@@ -21,7 +21,7 @@ from utils.loss import hinge_embedding_loss, class_balanced_cross_entropy_loss, 
 from utils.misc import AverageMeter, get_optimizer
 from utils.metric import eval_iou, eval_plane_prediction
 from utils.disp import tensor_to_image
-from utils.disp import colors_256 as colors
+from utils.disp import colors as colors
 from bin_mean_shift import Bin_Mean_Shift
 from modules import k_inv_dot_xy1
 from utils.loss import Q_loss

@@ -1,0 +1,50 @@
+{
+    "_type": 1,
+    "_useCustomFOV": false,
+    "_customFOV": 50.0,
+    "_customLenShiftX": 0.0,
+    "_shadowMultiplier": 1.0,
+    "_surfaces": [
+        {
+            "_type": 1,
+            "_perspectivePoints": {
+                "_points": [PERSPECTIVE_POINTS_TOKEN],
+                "_name": "Perspective Points"
+            },
+            "_perspectiveWorldSize": {
+                "x": 1.0,
+                "y": 1.0
+            },
+            "_estimatedBoundryWorldSize": {
+                "x": 1.0,
+                "y": 1.0
+            },
+            "_hasAutoComputedPerspective": false,
+            "_eulerAngles": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+            },
+            "_viewSpaceOffset": {
+                "x": 1.0,
+                "y": 1.0
+            },
+            "_boundryPoints": {
+                "_points": [BOUNDRY_POINTS_TOKEN],
+                "_name": "Boundry Points"
+            },
+            "_maskPoints": [
+                {
+                    "_points": [],
+                    "_name": "Mask 1"
+                }
+            ],
+            "_prerenderedMaskPath": "MASK_IMAGE_TOKEN",
+            "_prerenderedLightMapPath": "",
+            "_generatedLightMapBlurAmount": 3.0,
+            "_generatedLightMapBrightness": 0.3,
+            "_surfaceRotation": 0.0
+        }
+    ],
+    "_backgroundPath": "COLOR_IMAGE_TOKEN"
+}

@@ -1,0 +1,66 @@
+## PlanarReconstruction Notes ##
+
+
+
+#
+# repo
+
+https://github.com/tomhog/PlanarReconstruction
+
+
+#get code
+
+git clone https://github.com/tomhog/PlanarReconstruction
+cd ./PlanarReconstruction
+
+
+
+#
+# setup environment
+
+
+# install conda
+
+macOS
+brew cask install anaconda
+
+linux (need to test)
+apt-get install anaconda
+
+
+# add anaconda to your path variable
+
+macOS open /Users/(user)/.bash_profile and add
+export PATH="/usr/local/anaconda3/bin:$PATH"
+
+
+# setup conda
+
+conda init bash
+
+
+# create virtual environment
+
+conda create -y -n plane python=3.6
+
+
+# active virtual environment
+
+conda activate plane
+
+
+# install dependancies
+
+conda install -c menpo opencv
+pip install -r requirements.txt
+
+
+# potentially download and install (looks like it should automatically but didn't for me)
+
+http://sceneparsing.csail.mit.edu/model/pretrained_resnet/resnet101-imagenet.pth
+install it ~/.torch/models
+
+
+# run
+
+python predict.py eval with resume_dir=pretrained.pt input_image=room.jpg

@@ -131,6 +131,9 @@ def Q_loss(param, k_inv_dot_xy1, gt_depth):
     gt_depth = gt_depth.view(1, h*w)
     param = param.view(c, h*w)
 
+    #paramnumpy = param.cpu().numpy();
+    #pixelplanes = param.cpu().numpy()[0].reshape(h, w);
+
     # infer depth for every pixel
     infered_depth = 1. / torch.sum(param * k_inv_dot_xy1, dim=0, keepdim=True)  # (1, h*w)
     infered_depth = infered_depth.view(1, h * w)

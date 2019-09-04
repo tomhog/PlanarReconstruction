@@ -1,5 +1,7 @@
 import os
+import os.path
 import cv2
+import base64
 import time
 import random
 import pickle
@@ -16,11 +18,16 @@ import torchvision.transforms as tf
 
 from models.baseline_same import Baseline as UNet
 from utils.disp import tensor_to_image
-from utils.disp import colors_256 as colors
+from utils.disp import colors as colors
+from utils.disp import aspectFitSizeInSize as aspectFitSizeInSize
 from bin_mean_shift import Bin_Mean_Shift
 from modules import k_inv_dot_xy1
 from utils.loss import Q_loss
 from instance_parameter_loss import InstanceParameterLoss
+
+from utils.vmutils import computeMainContourAndBoundry as computeMainContourAndBoundry
+from utils.vmutils import computeViewSpaceXYZ as computeViewSpaceXYZ
+from utils.vmutils import computeImageSpaceXYZ as computeImageSpaceXYZ
 
 ex = Experiment()
 
@@ -65,8 +72,19 @@ def eval(_run, _log):
     with torch.no_grad():
         for i in range(1):
             image = cv2.imread(cfg.input_image)
+
+            # scale to fit canvas area
+            canvas_size = [2346, 1440]
+            fited_size = aspectFitSizeInSize([image.shape[1], image.shape[0]], canvas_size)
+            fitted_input_image = cv2.resize(image, (fited_size[0], fited_size[1]), interpolation=cv2.INTER_CUBIC)
+
+            #base 64 of original image
+            retval, buffer = cv2.imencode('.jpg', fitted_input_image)
+            input_image_base64 = base64.b64encode(buffer)
+
             # the network is trained with 192*256 and the intrinsic parameter is set as ScanNet
-            image = cv2.resize(image, (w, h))
+            image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
+            srcimg = image.copy()
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(image)
             #
@@ -104,37 +122,181 @@ def eval(_run, _log):
             predict_segmentation[prob.cpu().numpy().reshape(-1) <= 0.1] = 20
             predict_segmentation = predict_segmentation.reshape(h, w)
 
-            # visualization and evaluation
-            image = tensor_to_image(image.cpu()[0])
-            mask = (prob > 0.1).float().cpu().numpy().reshape(h, w)
-            depth = instance_depth.cpu().numpy()[0, 0].reshape(h, w)
-            per_pixel_depth = per_pixel_depth.cpu().numpy()[0, 0].reshape(h, w)
-
-            # use per pixel depth for non planar region
-            depth = depth * (predict_segmentation != 20) + per_pixel_depth * (predict_segmentation == 20)
-
             # change non planar to zero, so non planar region use the black color
             predict_segmentation += 1
             predict_segmentation[predict_segmentation==21] = 0
 
-            pred_seg = cv2.resize(np.stack([colors[predict_segmentation, 0],
-                                            colors[predict_segmentation, 1],
-                                            colors[predict_segmentation, 2]], axis=2), (w, h))
+            # filter out the biggest plane
+            uniquePlaneIds, uniquePlanePixelCounts = np.unique(predict_segmentation, return_counts=True)
+            uniquePlaneIds = np.delete(uniquePlaneIds, 0)
+            uniquePlanePixelCounts = np.delete(uniquePlanePixelCounts, 0)
+            floor_plane_index = np.argmax(uniquePlanePixelCounts)
+            floor_plane_id = uniquePlaneIds[floor_plane_index]
+
+            predict_segmentation[predict_segmentation!=floor_plane_id] = 0
+            predict_segmentation[predict_segmentation != 0] = 1
+
+
+            planes = instance_parameter.cpu().numpy().reshape(3,instance_parameter.shape[1])
+            floor_plane_params = np.array([planes[0][floor_plane_index], planes[1][floor_plane_index], planes[2][floor_plane_index]])
+
+            # get full res contour and boundry
+            floor_contour, floor_boundry_points = computeMainContourAndBoundry(predict_segmentation, (fited_size[0], fited_size[1]))
+            
+            
+            # read the json template and insert out base 64 data
+            jsonstream = open("evn_template.json", "r")
+            json_template_string = jsonstream.read()
+            jsonstream.close()
+
+            base64_header = '$base64^jpeg,'
+
+            json_template_string = json_template_string.replace('MASK_IMAGE_TOKEN', "") # base64_header + mask_image_base64.decode('utf-8'))
+            json_template_string = json_template_string.replace('COLOR_IMAGE_TOKEN', base64_header + input_image_base64.decode('utf-8'))
+
+            # fill boundry list
+            vector_string_template = "{\"x\": X_VAL,\"y\": Y_VAL}"
+            floor_boundry_points_string = ""
+            for vec in floor_boundry_points:
+                xcoord = (vec[0] - (fited_size[0] * 0.5)) # + (canvas_size[0] * 0.5)
+                ycoord = ((canvas_size[1] - vec[1]) - (fited_size[1] * 0.5)) # + (canvas_size[1] * 0.5)
+                vec_str = vector_string_template.replace("X_VAL", str(xcoord))
+                vec_str = vec_str.replace("Y_VAL", str(ycoord))
+                floor_boundry_points_string += vec_str + ","
+            floor_boundry_points_string = floor_boundry_points_string[:-1]
+
+            json_template_string = json_template_string.replace("BOUNDRY_POINTS_TOKEN", floor_boundry_points_string)
+
+            #
+            # calc pose
+            #
+
+            depth = instance_depth.cpu().numpy()[0, 0].reshape(h, w)
+            per_pixel_depth = per_pixel_depth.cpu().numpy()[0, 0].reshape(h, w)
+
+            # use per pixel depth for non planar region
+            depth = depth * (predict_segmentation != 0) + per_pixel_depth * (predict_segmentation == 0)
+
+            viewspace_xyz = computeViewSpaceXYZ(depth, segmentation)
+            low_contour, low_boundry_points = computeMainContourAndBoundry(predict_segmentation, (w, h))
+
+            # compute the center of the contour
+            M = cv2.moments(low_contour)
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+
+            cv2.circle(srcimg, (cX,cY), 4, (255,0,0))
+
+            bx,by,bw,bh = cv2.boundingRect(low_contour)
+
+            planep0 = viewspace_xyz[cY][cX]
+            planep1 = viewspace_xyz[cY][cX + 1]
+            planep2 = viewspace_xyz[cY + 1][cX]
+            
+            p0to1 = planep1 - planep0
+            p0to1 = p0to1 / np.linalg.norm(p0to1)
+            p0to2 = planep2 - planep0
+            p0to2 = p0to2 / np.linalg.norm(p0to2)
+            pnormal = -np.cross(p0to1, p0to2)
+
+            floor_plane_normal = pnormal #(floor_plane_params / floor_plane_dist)
+
+            floor_viewspace_center = planep0 #-floor_plane_normal * floor_plane_dist
+
+            up_vector = np.array([0,1,0])
+            
+            floor_plane_tanget = np.cross(floor_plane_normal, up_vector)
+            floor_plane_tanget = floor_plane_tanget / np.linalg.norm(floor_plane_tanget)
+            floor_plane_bitanget = np.cross(floor_plane_normal, floor_plane_tanget)
+            floor_plane_bitanget = floor_plane_bitanget / np.linalg.norm(floor_plane_bitanget)
+            floor_plane_tanget *= 0.5
+            floor_plane_bitanget *= 0.5
+
+            floor_pose_points = np.array([
+                                            [floor_viewspace_center + (-floor_plane_tanget + -floor_plane_bitanget) ],
+                                            [floor_viewspace_center + (floor_plane_tanget + -floor_plane_bitanget) ],
+                                            [floor_viewspace_center + (floor_plane_tanget + floor_plane_bitanget) ],
+                                            [floor_viewspace_center + (-floor_plane_tanget + floor_plane_bitanget) ]
+                                        ])
+            
+            focal_length = float(canvas_size[1] / 2)
+            center = (canvas_size[0]/2, canvas_size[1]/2)
+            camera_matrix = np.array(
+                                    [[focal_length, 0, center[0]],
+                                    [0, focal_length, center[1]],
+                                    [0, 0, 1]], dtype = "double"
+                                    )
+
+            dist_coeffs = np.zeros((4,1)) # Assuming no lens distortion
+            rotation_vector = np.zeros((3,1))
+            translation_vector = np.zeros((3,1))
+
+            (projected_floor_pose_points, jacobian) = cv2.projectPoints(floor_pose_points, rotation_vector, translation_vector, camera_matrix, dist_coeffs)
+            projected_floor_pose_points = projected_floor_pose_points.reshape(-1, 2)
+
+
+            center = (w/2, h/2)
+            camera_matrix = np.array(
+                                    [[focal_length, 0, center[0]],
+                                    [0, focal_length, center[1]],
+                                    [0, 0, 1]], dtype = "double"
+                                    )
+
+            (plane0_projected, jacobian) = cv2.projectPoints(np.array([planep0]), rotation_vector, translation_vector, camera_matrix, dist_coeffs)
+            plane0_projected = plane0_projected.reshape(-1, 2)
+
+            cv2.circle(srcimg, (int(plane0_projected[0][0]),int(plane0_projected[0][1])), 4, (0,0,255))
+            cv2.imwrite("vis.jpg", srcimg)
+
+            print('image pt: ' + str(cX) + ', ' + str(cY) + ' proj pt: ' + str(plane0_projected[0][0]) + ', ' + str(plane0_projected[0][1]))
+
+            perspective_points_string = ""
+            for vec in projected_floor_pose_points:
+                xcoord = (vec[0] - (canvas_size[0] * 0.5)) # + (canvas_size[0] * 0.5)
+                ycoord = ((canvas_size[1] - vec[1]) - (canvas_size[1] * 0.5)) # + (canvas_size[1] * 0.5)
+                vec_str = vector_string_template.replace("X_VAL", str(xcoord))
+                vec_str = vec_str.replace("Y_VAL", str(ycoord))
+                perspective_points_string += vec_str + ","
+            perspective_points_string = perspective_points_string[:-1]
+
+            json_template_string = json_template_string.replace("PERSPECTIVE_POINTS_TOKEN", perspective_points_string)
+
+            #
+            #
 
             # blend image
-            blend_pred = (pred_seg * 0.7 + image * 0.3).astype(np.uint8)
+            blended_image = fitted_input_image.copy()
 
-            mask = cv2.resize((mask * 255).astype(np.uint8), (w, h))
-            mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            cv2.line(blended_image, (int(projected_floor_pose_points[0][0]), int(projected_floor_pose_points[0][1])),
+                        (int(projected_floor_pose_points[1][0]), int(projected_floor_pose_points[1][1])),
+                        (0,255,0),5)
 
-            # visualize depth map as PlaneNet
-            depth = 255 - np.clip(depth / 5 * 255, 0, 255).astype(np.uint8)
-            depth = cv2.cvtColor(cv2.resize(depth, (w, h)), cv2.COLOR_GRAY2BGR)
+            cv2.line(blended_image, (int(projected_floor_pose_points[1][0]), int(projected_floor_pose_points[1][1])),
+                        (int(projected_floor_pose_points[2][0]), int(projected_floor_pose_points[2][1])),
+                        (0,255,0),5)
 
-            image = np.concatenate((image, pred_seg, blend_pred, mask, depth), axis=1)
+            cv2.line(blended_image, (int(projected_floor_pose_points[2][0]), int(projected_floor_pose_points[2][1])),
+                        (int(projected_floor_pose_points[3][0]), int(projected_floor_pose_points[3][1])),
+                        (0,255,0),5)
 
-            cv2.imshow('image', image)
-            cv2.waitKey(0)
+            cv2.line(blended_image, (int(projected_floor_pose_points[3][0]), int(projected_floor_pose_points[3][1])),
+                        (int(projected_floor_pose_points[0][0]), int(projected_floor_pose_points[0][1])),
+                        (0,255,0),5)
+
+            cv2.imwrite('blended.jpg',blended_image)
+
+            # build output filename
+            extension = os.path.splitext(cfg.input_image)[1]
+            basename = os.path.splitext(os.path.abspath(cfg.input_image))[0]
+
+            output_json_file = os.path.join(basename + ".json" )
+
+            output_json_stream = open(output_json_file, 'w')
+            output_json_stream.write(json_template_string)
+            output_json_stream.close()
+
+            #cv2.imshow('image', image)
+            #cv2.waitKey(0)
 
 
 if __name__ == '__main__':
