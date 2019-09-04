@@ -1,0 +1,5 @@
+{
+    "python.linting.enabled": true,
+    "python.pythonPath": "/usr/local/anaconda3/envs/plane/bin/python",
+    "python.condaPath": "/usr/local/anaconda3/bin/conda"
+}

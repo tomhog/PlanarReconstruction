@@ -82,9 +82,10 @@ def eval(_run, _log):
             retval, buffer = cv2.imencode('.jpg', fitted_input_image)
             input_image_base64 = base64.b64encode(buffer)
 
+            #image = cv2.GaussianBlur(image, (7,7), 0)
             # the network is trained with 192*256 and the intrinsic parameter is set as ScanNet
             image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
-            srcimg = image.copy()
+            image = cv2.GaussianBlur(image, (5,5), 0)
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(image)
             #
@@ -136,10 +137,6 @@ def eval(_run, _log):
             predict_segmentation[predict_segmentation!=floor_plane_id] = 0
             predict_segmentation[predict_segmentation != 0] = 1
 
-
-            planes = instance_parameter.cpu().numpy().reshape(3,instance_parameter.shape[1])
-            floor_plane_params = np.array([planes[0][floor_plane_index], planes[1][floor_plane_index], planes[2][floor_plane_index]])
-
             # get full res contour and boundry
             floor_contour, floor_boundry_points = computeMainContourAndBoundry(predict_segmentation, (fited_size[0], fited_size[1]))
             
@@ -185,10 +182,6 @@ def eval(_run, _log):
             cX = int(M["m10"] / M["m00"])
             cY = int(M["m01"] / M["m00"])
 
-            cv2.circle(srcimg, (cX,cY), 4, (255,0,0))
-
-            bx,by,bw,bh = cv2.boundingRect(low_contour)
-
             planep0 = viewspace_xyz[cY][cX]
             planep1 = viewspace_xyz[cY][cX + 1]
             planep2 = viewspace_xyz[cY + 1][cX]
@@ -199,9 +192,8 @@ def eval(_run, _log):
             p0to2 = p0to2 / np.linalg.norm(p0to2)
             pnormal = -np.cross(p0to1, p0to2)
 
-            floor_plane_normal = pnormal #(floor_plane_params / floor_plane_dist)
-
-            floor_viewspace_center = planep0 #-floor_plane_normal * floor_plane_dist
+            floor_plane_normal = pnormal
+            floor_viewspace_center = planep0
 
             up_vector = np.array([0,1,0])
             
@@ -235,21 +227,6 @@ def eval(_run, _log):
             projected_floor_pose_points = projected_floor_pose_points.reshape(-1, 2)
 
 
-            center = (w/2, h/2)
-            camera_matrix = np.array(
-                                    [[focal_length, 0, center[0]],
-                                    [0, focal_length, center[1]],
-                                    [0, 0, 1]], dtype = "double"
-                                    )
-
-            (plane0_projected, jacobian) = cv2.projectPoints(np.array([planep0]), rotation_vector, translation_vector, camera_matrix, dist_coeffs)
-            plane0_projected = plane0_projected.reshape(-1, 2)
-
-            cv2.circle(srcimg, (int(plane0_projected[0][0]),int(plane0_projected[0][1])), 4, (0,0,255))
-            cv2.imwrite("vis.jpg", srcimg)
-
-            print('image pt: ' + str(cX) + ', ' + str(cY) + ' proj pt: ' + str(plane0_projected[0][0]) + ', ' + str(plane0_projected[0][1]))
-
             perspective_points_string = ""
             for vec in projected_floor_pose_points:
                 xcoord = (vec[0] - (canvas_size[0] * 0.5)) # + (canvas_size[0] * 0.5)
@@ -260,30 +237,6 @@ def eval(_run, _log):
             perspective_points_string = perspective_points_string[:-1]
 
             json_template_string = json_template_string.replace("PERSPECTIVE_POINTS_TOKEN", perspective_points_string)
-
-            #
-            #
-
-            # blend image
-            blended_image = fitted_input_image.copy()
-
-            cv2.line(blended_image, (int(projected_floor_pose_points[0][0]), int(projected_floor_pose_points[0][1])),
-                        (int(projected_floor_pose_points[1][0]), int(projected_floor_pose_points[1][1])),
-                        (0,255,0),5)
-
-            cv2.line(blended_image, (int(projected_floor_pose_points[1][0]), int(projected_floor_pose_points[1][1])),
-                        (int(projected_floor_pose_points[2][0]), int(projected_floor_pose_points[2][1])),
-                        (0,255,0),5)
-
-            cv2.line(blended_image, (int(projected_floor_pose_points[2][0]), int(projected_floor_pose_points[2][1])),
-                        (int(projected_floor_pose_points[3][0]), int(projected_floor_pose_points[3][1])),
-                        (0,255,0),5)
-
-            cv2.line(blended_image, (int(projected_floor_pose_points[3][0]), int(projected_floor_pose_points[3][1])),
-                        (int(projected_floor_pose_points[0][0]), int(projected_floor_pose_points[0][1])),
-                        (0,255,0),5)
-
-            cv2.imwrite('blended.jpg',blended_image)
 
             # build output filename
             extension = os.path.splitext(cfg.input_image)[1]
