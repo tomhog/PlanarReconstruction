@@ -21,4 +21,5 @@ model:
   fix_bn: False
 
 input_image: 0000001.jpg
+unittext: 0
 

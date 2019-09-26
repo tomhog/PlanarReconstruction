@@ -21,9 +21,9 @@
             },
             "_hasAutoComputedPerspective": false,
             "_eulerAngles": {
-                "x": 0.0,
+                "x": FLOOR_PLANE_PITCH_TOKEN,
                 "y": 0.0,
-                "z": 0.0
+                "z": FLOOR_PLANE_ROLL_TOKEN
             },
             "_viewSpaceOffset": {
                 "x": 1.0,

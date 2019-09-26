@@ -1,5 +1,6 @@
 import os
 import os.path
+import glob
 import cv2
 import base64
 import time
@@ -25,9 +26,14 @@ from modules import k_inv_dot_xy1
 from utils.loss import Q_loss
 from instance_parameter_loss import InstanceParameterLoss
 
-from utils.vmutils import computeMainContourAndBoundry as computeMainContourAndBoundry
+from utils.vmutils import computeContoursAndBoundries as computeContoursAndBoundries
 from utils.vmutils import computeViewSpaceXYZ as computeViewSpaceXYZ
-from utils.vmutils import computeImageSpaceXYZ as computeImageSpaceXYZ
+from utils.vmutils import computeContourNormals as computeContourNormals
+from utils.vmutils import vectorToAngles as vectorToAngles
+from utils.vmutils import angleBetweenVectors as angleBetweenVectors
+from utils.vmutils import pitchVector as pitchVector
+from utils.vmutils import instance_ids as instance_ids
+from utils.vmutils import generateVMEnvironmentTemplate as generateVMEnvironmentTemplate
 
 ex = Experiment()
 
@@ -69,9 +75,17 @@ def eval(_run, _log):
 
     h, w = 192, 256
 
+    input_list = []
+    if cfg.input_image == 'test':
+        input_list = glob.glob("./tests/*.jpg")
+    else:
+        input_list.append(cfg.input_image)
+
     with torch.no_grad():
-        for i in range(1):
-            image = cv2.imread(cfg.input_image)
+        for input_image_path in input_list:
+            print('processing file: ' + str(input_image_path))
+
+            image = cv2.imread(input_image_path)
 
             # scale to fit canvas area
             canvas_size = [2346, 1440]
@@ -127,130 +141,17 @@ def eval(_run, _log):
             predict_segmentation += 1
             predict_segmentation[predict_segmentation==21] = 0
 
-            # filter out the biggest plane
-            uniquePlaneIds, uniquePlanePixelCounts = np.unique(predict_segmentation, return_counts=True)
-            uniquePlaneIds = np.delete(uniquePlaneIds, 0)
-            uniquePlanePixelCounts = np.delete(uniquePlanePixelCounts, 0)
-            floor_plane_index = np.argmax(uniquePlanePixelCounts)
-            floor_plane_id = uniquePlaneIds[floor_plane_index]
+            predict_segmentation[predict_segmentation > (len(instance_ids)-1)] = 0
+            #predict_segmentation[predict_segmentation != 0] = 1
 
-            predict_segmentation[predict_segmentation!=floor_plane_id] = 0
-            predict_segmentation[predict_segmentation != 0] = 1
-
-            # get full res contour and boundry
-            floor_contour, floor_boundry_points = computeMainContourAndBoundry(predict_segmentation, (fited_size[0], fited_size[1]))
-            
-            
-            # read the json template and insert out base 64 data
-            jsonstream = open("evn_template.json", "r")
-            json_template_string = jsonstream.read()
-            jsonstream.close()
-
-            base64_header = '$base64^jpeg,'
-
-            json_template_string = json_template_string.replace('MASK_IMAGE_TOKEN', "") # base64_header + mask_image_base64.decode('utf-8'))
-            json_template_string = json_template_string.replace('COLOR_IMAGE_TOKEN', base64_header + input_image_base64.decode('utf-8'))
-
-            # fill boundry list
-            vector_string_template = "{\"x\": X_VAL,\"y\": Y_VAL}"
-            floor_boundry_points_string = ""
-            for vec in floor_boundry_points:
-                xcoord = (vec[0] - (fited_size[0] * 0.5)) # + (canvas_size[0] * 0.5)
-                ycoord = ((canvas_size[1] - vec[1]) - (fited_size[1] * 0.5)) # + (canvas_size[1] * 0.5)
-                vec_str = vector_string_template.replace("X_VAL", str(xcoord))
-                vec_str = vec_str.replace("Y_VAL", str(ycoord))
-                floor_boundry_points_string += vec_str + ","
-            floor_boundry_points_string = floor_boundry_points_string[:-1]
-
-            json_template_string = json_template_string.replace("BOUNDRY_POINTS_TOKEN", floor_boundry_points_string)
-
-            #
-            # calc pose
-            #
-
+            # compute depth and viewspace xyz coords
             depth = instance_depth.cpu().numpy()[0, 0].reshape(h, w)
             per_pixel_depth = per_pixel_depth.cpu().numpy()[0, 0].reshape(h, w)
 
-            # use per pixel depth for non planar region
             depth = depth * (predict_segmentation != 0) + per_pixel_depth * (predict_segmentation == 0)
 
-            viewspace_xyz = computeViewSpaceXYZ(depth, segmentation)
-            low_contour, low_boundry_points = computeMainContourAndBoundry(predict_segmentation, (w, h))
-
-            # compute the center of the contour
-            M = cv2.moments(low_contour)
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-
-            planep0 = viewspace_xyz[cY][cX]
-            planep1 = viewspace_xyz[cY][cX + 1]
-            planep2 = viewspace_xyz[cY + 1][cX]
-            
-            p0to1 = planep1 - planep0
-            p0to1 = p0to1 / np.linalg.norm(p0to1)
-            p0to2 = planep2 - planep0
-            p0to2 = p0to2 / np.linalg.norm(p0to2)
-            pnormal = -np.cross(p0to1, p0to2)
-
-            floor_plane_normal = pnormal
-            floor_viewspace_center = planep0
-
-            up_vector = np.array([0,1,0])
-            
-            floor_plane_tanget = np.cross(floor_plane_normal, up_vector)
-            floor_plane_tanget = floor_plane_tanget / np.linalg.norm(floor_plane_tanget)
-            floor_plane_bitanget = np.cross(floor_plane_normal, floor_plane_tanget)
-            floor_plane_bitanget = floor_plane_bitanget / np.linalg.norm(floor_plane_bitanget)
-            floor_plane_tanget *= 0.5
-            floor_plane_bitanget *= 0.5
-
-            floor_pose_points = np.array([
-                                            [floor_viewspace_center + (-floor_plane_tanget + -floor_plane_bitanget) ],
-                                            [floor_viewspace_center + (floor_plane_tanget + -floor_plane_bitanget) ],
-                                            [floor_viewspace_center + (floor_plane_tanget + floor_plane_bitanget) ],
-                                            [floor_viewspace_center + (-floor_plane_tanget + floor_plane_bitanget) ]
-                                        ])
-            
-            focal_length = float(canvas_size[1] / 2)
-            center = (canvas_size[0]/2, canvas_size[1]/2)
-            camera_matrix = np.array(
-                                    [[focal_length, 0, center[0]],
-                                    [0, focal_length, center[1]],
-                                    [0, 0, 1]], dtype = "double"
-                                    )
-
-            dist_coeffs = np.zeros((4,1)) # Assuming no lens distortion
-            rotation_vector = np.zeros((3,1))
-            translation_vector = np.zeros((3,1))
-
-            (projected_floor_pose_points, jacobian) = cv2.projectPoints(floor_pose_points, rotation_vector, translation_vector, camera_matrix, dist_coeffs)
-            projected_floor_pose_points = projected_floor_pose_points.reshape(-1, 2)
-
-
-            perspective_points_string = ""
-            for vec in projected_floor_pose_points:
-                xcoord = (vec[0] - (canvas_size[0] * 0.5)) # + (canvas_size[0] * 0.5)
-                ycoord = ((canvas_size[1] - vec[1]) - (canvas_size[1] * 0.5)) # + (canvas_size[1] * 0.5)
-                vec_str = vector_string_template.replace("X_VAL", str(xcoord))
-                vec_str = vec_str.replace("Y_VAL", str(ycoord))
-                perspective_points_string += vec_str + ","
-            perspective_points_string = perspective_points_string[:-1]
-
-            json_template_string = json_template_string.replace("PERSPECTIVE_POINTS_TOKEN", perspective_points_string)
-
-            # build output filename
-            extension = os.path.splitext(cfg.input_image)[1]
-            basename = os.path.splitext(os.path.abspath(cfg.input_image))[0]
-
-            output_json_file = os.path.join(basename + ".json" )
-
-            output_json_stream = open(output_json_file, 'w')
-            output_json_stream.write(json_template_string)
-            output_json_stream.close()
-
-            #cv2.imshow('image', image)
-            #cv2.waitKey(0)
-
+            #generate vm data
+            generateVMEnvironmentTemplate(predict_segmentation, segmentation, depth, (w, h), fited_size, input_image_path, input_image_base64, cfg)
 
 if __name__ == '__main__':
     assert LooseVersion(torch.__version__) >= LooseVersion('0.4.0'), \
